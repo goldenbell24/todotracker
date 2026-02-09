@@ -82,27 +82,6 @@ def _call_openai_chat(api_key: str, model: str, system: str, user: str) -> Optio
         return None
 
 
-def _call_openai_image(api_key: str, prompt: str) -> Optional[str]:
-    """OpenAI 이미지 생성 호출. 실패 시 None."""
-    if not api_key:
-        return None
-
-    try:
-        from openai import OpenAI  # type: ignore
-
-        client = OpenAI(api_key=api_key)
-        result = client.images.generate(
-            model="gpt-image-1",
-            prompt=prompt,
-            size="1024x1024",
-        )
-        if not result.data:
-            return None
-        return result.data[0].url
-    except Exception:
-        return None
-
-
 COACH_SYSTEM_PROMPTS = {
     "스파르타 코치": (
         "너는 엄격하지만 공정한 스파르타 코치다. "
@@ -200,19 +179,6 @@ def generate_summary(
     )
 
 
-def generate_report_image(openai_key: str, summary: Optional[str]) -> Optional[str]:
-    """컨디션 리포트를 함축하는 AI 이미지 생성."""
-    if not summary:
-        return None
-
-    prompt = (
-        "Create a warm, minimal illustration that symbolizes a daily habit report. "
-        f"Focus on the mood of: {summary}. "
-        "No text, no logos, soft gradients, cozy atmosphere."
-    )
-    return _call_openai_image(openai_key, prompt)
-
-
 # -----------------------------
 # Mood labels
 # -----------------------------
@@ -269,6 +235,7 @@ def seed_demo_history():
                 "completion_rate": rate,
                 "mood": moods[6 - i],
                 "is_demo": True,
+                "total_habits": 5,
             }
         )
     st.session_state.history = demo + st.session_state.history
@@ -331,7 +298,7 @@ st.write("오늘의 습관을 체크하고, AI 코치의 컨디션 리포트를 
 st.subheader("✅ 오늘의 습관 체크인")
 
 # -----------------------------
-# 1) 습관 편집 버튼 + 편집 UI
+# 습관 편집 UI
 # -----------------------------
 top_left, top_right = st.columns([3, 1])
 with top_right:
@@ -414,7 +381,7 @@ else:
 
 
 # -----------------------------
-# 습관 체크박스 UI (2열) - 동적 생성
+# 습관 체크박스 UI (2열)
 # -----------------------------
 habits_list = st.session_state.habits_list
 habits_version = st.session_state.get("habits_version", 0)
@@ -433,7 +400,7 @@ for idx, h in enumerate(habits_list):
         habits_checked[label] = st.checkbox(label, key=widget_key)
 
 # -----------------------------
-# 2) 기분 슬라이더: 구간별 라벨 + 이모지
+# 기분 + 코치 스타일
 # -----------------------------
 mood = st.slider("😊 오늘 기분은 어때요? (1~10)", min_value=1, max_value=10, value=7)
 mood_label, mood_emoji = mood_descriptor(mood)
@@ -446,7 +413,7 @@ coach_style = st.radio(
 )
 
 # -----------------------------
-# Metrics + Progress
+# Metrics
 # -----------------------------
 total_habits = max(1, len(habits_list))
 completed_count = sum(1 for v in habits_checked.values() if v)
@@ -463,86 +430,103 @@ with m3:
 upsert_today_record(completed_count, completion_rate, mood, total_habits)
 
 # -----------------------------
-# Calendar (최근 추이)
+# Calendar (이번 달 달력 형태 + 달성률 색)
 # -----------------------------
 st.subheader("🗓️ 최근 추이 (달력)")
 
 history_df = pd.DataFrame(st.session_state.history)
-
 if not history_df.empty:
     history_df["date"] = pd.to_datetime(history_df["date"])
     history_df = history_df.sort_values("date")
 
-    # 최근 28일(4주) 캘린더 히트맵
-    today = pd.to_datetime(dt.date.today().isoformat())
-    start = today - pd.Timedelta(days=27)
+    # 이번 달 범위 생성 (일반 달력 모양: 일~토)
+    today = dt.date.today()
+    first_day = dt.date(today.year, today.month, 1)
+    next_month = dt.date(today.year + (today.month == 12), (today.month % 12) + 1, 1)
+    last_day = next_month - dt.timedelta(days=1)
 
-    recent = history_df[(history_df["date"] >= start) & (history_df["date"] <= today)].copy()
+    # 달력 시작(일요일) / 끝(토요일)로 확장
+    # Python weekday: 월=0..일=6
+    first_weekday = first_day.weekday()
+    # 일요일 시작으로 맞추기 위해: 일요일 index=6, 월요일=0
+    days_to_sun = (first_weekday + 1) % 7  # 월0->1, ... 일6->0
+    cal_start = first_day - dt.timedelta(days=days_to_sun)
 
-    # 모든 날짜 채우기 (빈 날은 0%)
-    all_days = pd.date_range(start=start, end=today, freq="D")
-    recent = recent.set_index("date").reindex(all_days)
-    recent.index.name = "date"
-    recent = recent.reset_index()
+    last_weekday = last_day.weekday()
+    days_to_sat = (5 - last_weekday) % 7  # 토=5
+    cal_end = last_day + dt.timedelta(days=days_to_sat)
 
-    recent["completion_rate"] = recent["completion_rate"].fillna(0).astype(int)
+    all_days = pd.date_range(start=cal_start, end=cal_end, freq="D")
+    cal = pd.DataFrame({"date": all_days})
+    cal["date_only"] = cal["date"].dt.date
+    cal["in_month"] = cal["date_only"].apply(lambda d: d.month == today.month and d.year == today.year)
 
-    # 달력 그리드용: 주(week) / 요일(dow)
-    # (최근 28일 기준으로 4주로 보이도록 week_index를 직접 계산)
-    recent["day_index"] = (recent["date"] - start).dt.days
-    recent["week"] = (recent["day_index"] // 7).astype(int)  # 0~3
-    recent["dow"] = recent["date"].dt.dayofweek  # 월=0 ... 일=6
+    # 기록 merge
+    hd = history_df.copy()
+    hd["date_only"] = hd["date"].dt.date
+    cal = cal.merge(hd[["date_only", "completion_rate"]], on="date_only", how="left")
+    cal["completion_rate"] = cal["completion_rate"].fillna(0).astype(int)
 
-    # 표시용 텍스트
-    recent["day"] = recent["date"].dt.day.astype(str)
-    recent["date_str"] = recent["date"].dt.strftime("%Y-%m-%d")
+    # 달력 좌표: 주차(row), 요일(col) (일=0..토=6)
+    # Sunday=0: (weekday+1)%7
+    cal["dow"] = cal["date"].dt.weekday.apply(lambda x: (x + 1) % 7)
+    cal["week"] = ((cal["date"] - pd.to_datetime(cal_start)).dt.days // 7).astype(int)
 
-    # 요일 라벨(월~일)
-    dow_labels = ["월", "화", "수", "목", "금", "토", "일"]
+    cal["day"] = cal["date"].dt.day.astype(str)
+    cal["date_str"] = cal["date"].dt.strftime("%Y-%m-%d")
 
-    # 초록 그라데이션(낮음=연초록, 높음=진초록)
-    # - 스케일은 0~100 고정
-    calendar = (
-        alt.Chart(recent)
+    dow_labels = ["일", "월", "화", "수", "목", "금", "토"]
+    month_title = f"{today.year}년 {today.month}월"
+
+    # in_month 아닌 날은 회색으로 표시
+    color_expr = alt.condition(
+        alt.datum.in_month,
+        alt.Color(
+            "completion_rate:Q",
+            scale=alt.Scale(domain=[0, 100], range=["#e9f7ef", "#0b6b3a"]),
+            legend=alt.Legend(title="달성률(%)", orient="right"),
+        ),
+        alt.value("#f2f2f2"),
+    )
+
+    rect = (
+        alt.Chart(cal)
         .mark_rect(cornerRadius=6)
         .encode(
-            x=alt.X("dow:O", title="", sort=list(range(7)),
-                    axis=alt.Axis(labelExpr=f"['{dow_labels[0]}','{dow_labels[1]}','{dow_labels[2]}','{dow_labels[3]}','{dow_labels[4]}','{dow_labels[5]}','{dow_labels[6]}'][datum.value]")),
-            y=alt.Y("week:O", title="", sort=list(range(3, -1, -1))),  # 최신 주가 아래쪽으로
-            color=alt.Color(
-                "completion_rate:Q",
-                title="달성률(%)",
-                scale=alt.Scale(domain=[0, 100], range=["#e9f7ef", "#0b6b3a"]),  # 연초록 -> 진초록
-                legend=alt.Legend(orient="right"),
+            x=alt.X(
+                "dow:O",
+                title="",
+                sort=list(range(7)),
+                axis=alt.Axis(
+                    labelExpr="['일','월','화','수','목','금','토'][datum.value]"
+                ),
             ),
+            y=alt.Y("week:O", title="", sort=list(range(cal["week"].max() + 1))),
+            color=color_expr,
             tooltip=[
                 alt.Tooltip("date_str:N", title="날짜"),
+                alt.Tooltip("in_month:N", title="이번 달", format=""),
                 alt.Tooltip("completion_rate:Q", title="달성률(%)"),
             ],
         )
-        .properties(height=220)
+        .properties(height=260, title=month_title)
     )
 
-    # 날짜 숫자 오버레이
-    labels = (
-        alt.Chart(recent)
+    # 날짜 숫자 오버레이 (이번 달만 표시)
+    label = (
+        alt.Chart(cal[cal["in_month"]])
         .mark_text(baseline="middle", fontSize=12)
         .encode(
             x=alt.X("dow:O", sort=list(range(7)), title=""),
-            y=alt.Y("week:O", sort=list(range(3, -1, -1)), title=""),
+            y=alt.Y("week:O", sort=list(range(cal["week"].max() + 1)), title=""),
             text=alt.Text("day:N"),
-            tooltip=[
-                alt.Tooltip("date_str:N", title="날짜"),
-                alt.Tooltip("completion_rate:Q", title="달성률(%)"),
-            ],
         )
     )
 
-    st.altair_chart(calendar + labels, use_container_width=True)
-    st.caption("최근 28일 기준. 색이 진할수록 달성률이 높아요. (빈 날은 0%로 표시)")
+    st.altair_chart(rect + label, use_container_width=True)
+    st.caption("이번 달 달력 형태로 표시됩니다. 색이 진할수록 달성률이 높아요. (이번 달이 아닌 칸은 회색)")
 else:
     st.info("기록이 아직 없습니다.")
-
 
 
 # -----------------------------
@@ -567,12 +551,12 @@ if btn:
         mood_label=mood_label,
         dog_breed=dog_breed,
     )
+
     summary = generate_summary(
         openai_key=st.session_state.openai_key,
         report=report,
         completion_rate=completion_rate,
     )
-    report_image_url = generate_report_image(st.session_state.openai_key, summary)
 
     wcol, dcol = st.columns(2)
 
@@ -592,32 +576,11 @@ if btn:
         else:
             st.warning("강아지 이미지를 가져오지 못했어요. (네트워크를 확인해 주세요)")
 
-    # ✅ (충돌 구간 정리) 요약 + 이미지 섹션
     st.markdown("### ✨ 컨디션 리포트 요약")
-    summary_cols = st.columns(2)
-
-    with summary_cols[0]:
-        st.markdown("**한 줄 요약**")
-        if summary:
-            st.write(summary)
-        else:
-            st.warning("요약을 생성하지 못했어요. (OpenAI API Key/네트워크를 확인해 주세요)")
-
-        st.markdown("**오늘의 달성률**")
-        st.write(f"{completion_rate}%")
-
-        st.markdown("**오늘의 강아지 사진**")
-        if dog_url:
-            st.image(dog_url, use_container_width=True)
-        else:
-            st.warning("강아지 이미지를 가져오지 못했어요.")
-
-    with summary_cols[1]:
-        st.markdown("**AI 생성 이미지**")
-        if report_image_url:
-            st.image(report_image_url, use_container_width=True)
-        else:
-            st.warning("AI 이미지를 생성하지 못했어요. (OpenAI API Key/네트워크를 확인해 주세요)")
+    if summary:
+        st.write(summary)
+    else:
+        st.warning("요약을 생성하지 못했어요. (OpenAI API Key/네트워크를 확인해 주세요)")
 
     share_payload = {
         "date": dt.date.today().isoformat(),
@@ -630,11 +593,9 @@ if btn:
         "dog_breed": dog_breed,
         "report": report,
         "summary": summary,
-        "report_image_url": report_image_url,
         "habits_checked": {k: v for k, v in habits_checked.items()},
     }
 
-    # ✅ (충돌 구간 정리) 공유 텍스트에 한 줄 요약 포함
     share_text = (
         "📊 AI 습관 트래커 공유\n"
         f"- 날짜: {share_payload['date']}\n"
