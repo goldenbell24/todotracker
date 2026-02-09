@@ -4,6 +4,7 @@ import json
 import re
 from typing import Dict, Optional, Tuple, List
 
+import altair as alt
 import pandas as pd
 import requests
 import streamlit as st
@@ -18,8 +19,6 @@ st.set_page_config(page_title="AI 습관 트래커", page_icon="📊", layout="w
 # -----------------------------
 # Helpers: APIs
 # -----------------------------
-
-
 def _extract_breed_from_url(image_url: str) -> Optional[str]:
     m = re.search(r"/breeds/([^/]+)/", image_url)
     if not m:
@@ -79,6 +78,27 @@ def _call_openai_chat(api_key: str, model: str, system: str, user: str) -> Optio
             messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
         )
         return resp["choices"][0]["message"]["content"]
+    except Exception:
+        return None
+
+
+def _call_openai_image(api_key: str, prompt: str) -> Optional[str]:
+    """OpenAI 이미지 생성 호출. 실패 시 None."""
+    if not api_key:
+        return None
+
+    try:
+        from openai import OpenAI  # type: ignore
+
+        client = OpenAI(api_key=api_key)
+        result = client.images.generate(
+            model="gpt-image-1",
+            prompt=prompt,
+            size="1024x1024",
+        )
+        if not result.data:
+            return None
+        return result.data[0].url
     except Exception:
         return None
 
@@ -151,13 +171,53 @@ def generate_report(
     )
 
 
+def generate_summary(
+    openai_key: str,
+    report: Optional[str],
+    completion_rate: int,
+) -> Optional[str]:
+    """컨디션 리포트 1줄 요약 생성."""
+    if not report:
+        return None
+
+    system = "너는 한국어로 핵심을 한 줄로 요약하는 도우미다."
+    user_prompt = f"""
+다음은 사용자 컨디션 리포트야. 한 줄 요약을 만들어줘.
+- 출력은 1줄만 작성
+- 60자 이내
+- 과도한 감정 표현이나 진단은 금지
+- 달성률({completion_rate}%)을 자연스럽게 포함
+
+[리포트]
+{report}
+""".strip()
+
+    return _call_openai_chat(
+        api_key=openai_key,
+        model="gpt-5-mini",
+        system=system,
+        user=user_prompt,
+    )
+
+
+def generate_report_image(openai_key: str, summary: Optional[str]) -> Optional[str]:
+    """컨디션 리포트를 함축하는 AI 이미지 생성."""
+    if not summary:
+        return None
+
+    prompt = (
+        "Create a warm, minimal illustration that symbolizes a daily habit report. "
+        f"Focus on the mood of: {summary}. "
+        "No text, no logos, soft gradients, cozy atmosphere."
+    )
+    return _call_openai_image(openai_key, prompt)
+
+
 # -----------------------------
 # Mood labels
 # -----------------------------
 def mood_descriptor(score: int) -> Tuple[str, str]:
-    """
-    1~10 점수를 짧은 표현 + 이모지로 매핑
-    """
+    """1~10 점수를 짧은 표현 + 이모지로 매핑"""
     if score <= 2:
         return "😣 많이 지침/우울", "😣"
     if score <= 4:
@@ -280,13 +340,11 @@ with top_right:
 if edit_mode:
     st.info("습관 목록을 수정한 뒤 **저장**을 누르세요. (이름은 중복되지 않게 추천)")
 
-    # 편집용 임시 리스트 (세션에 바로 반영하지 않고 저장 버튼에서 반영)
     if "habits_draft" not in st.session_state:
         st.session_state.habits_draft = [h.copy() for h in st.session_state.habits_list]
 
     draft: List[Dict] = st.session_state.habits_draft
 
-    # 목록 편집
     for i, h in enumerate(draft):
         c1, c2, c3 = st.columns([1, 4, 1])
         with c1:
@@ -295,7 +353,7 @@ if edit_mode:
             name = st.text_input("습관 이름", value=h.get("name", ""), key=f"draft_name_{i}")
         with c3:
             remove = st.button("🗑️", key=f"remove_{i}")
-        # 즉시 반영
+
         h["emoji"] = (emoji or "✅").strip()
         h["name"] = (name or "").strip()
 
@@ -323,7 +381,6 @@ if edit_mode:
     save_c1, save_c2 = st.columns([1, 5])
     with save_c1:
         if st.button("💾 저장", type="primary"):
-            # 유효성: 빈 이름 제거, 중복 이름 처리(중복이면 뒤에 (2) 붙임)
             cleaned = []
             seen = {}
             for h in draft:
@@ -343,9 +400,7 @@ if edit_mode:
                 st.error("최소 1개 이상의 습관이 필요해요.")
             else:
                 st.session_state.habits_list = cleaned
-                # draft 재생성
                 st.session_state.habits_draft = [h.copy() for h in cleaned]
-                # 기존 체크박스 키 충돌 방지: 체크 키에 버전 사용
                 st.session_state.habits_version = st.session_state.get("habits_version", 0) + 1
                 st.success("습관 목록을 저장했어요!")
                 st.rerun()
@@ -354,9 +409,7 @@ if edit_mode:
         if st.button("↩️ 변경 취소"):
             st.session_state.habits_draft = [h.copy() for h in st.session_state.habits_list]
             st.rerun()
-
 else:
-    # 편집 모드 종료 시 draft는 최신으로 맞춰둠
     st.session_state.habits_draft = [h.copy() for h in st.session_state.habits_list]
 
 
@@ -374,7 +427,6 @@ for idx, h in enumerate(habits_list):
     name = h.get("name", f"습관 {idx+1}")
     label = f"{emoji} {name}".strip()
 
-    # key는 habits_version 포함해서, 편집 후 위젯 상태/충돌 최소화
     widget_key = f"habit_{habits_version}_{idx}_{name}"
     target_col = col_a if idx % 2 == 0 else col_b
     with target_col:
@@ -394,7 +446,7 @@ coach_style = st.radio(
 )
 
 # -----------------------------
-# Metrics + Progress (총 습관 수 가변)
+# Metrics + Progress
 # -----------------------------
 total_habits = max(1, len(habits_list))
 completed_count = sum(1 for v in habits_checked.values() if v)
@@ -408,7 +460,6 @@ with m2:
 with m3:
     st.metric("기분", f"{mood}/10")
 
-# Save today's record
 upsert_today_record(completed_count, completion_rate, mood, total_habits)
 
 # -----------------------------
@@ -425,14 +476,37 @@ if not history_df.empty:
     start = today - pd.Timedelta(days=6)
     last7 = history_df[(history_df["date"] >= start) & (history_df["date"] <= today)].copy()
 
-    # Ensure all 7 days exist
     all_days = pd.date_range(start=start, end=today, freq="D")
     last7 = last7.set_index("date").reindex(all_days)
     last7.index.name = "date"
     last7 = last7.reset_index()
     last7["completion_rate"] = last7["completion_rate"].fillna(0).astype(int)
 
-    st.bar_chart(last7.set_index("date")[["completion_rate"]])
+    def _rate_color(rate: int) -> str:
+        if rate == 100:
+            return "#8B1E1E"
+        if rate >= 75:
+            return "#F28C28"
+        if rate >= 50:
+            return "#F5C542"
+        return "#F9E79F"
+
+    last7["color"] = last7["completion_rate"].apply(_rate_color)
+
+    chart = (
+        alt.Chart(last7)
+        .mark_bar()
+        .encode(
+            x=alt.X("date:T", title=""),
+            y=alt.Y("completion_rate:Q", title="달성률(%)", scale=alt.Scale(domain=[0, 100])),
+            color=alt.Color("color:N", scale=None, legend=None),
+            tooltip=[
+                alt.Tooltip("date:T", title="날짜"),
+                alt.Tooltip("completion_rate:Q", title="달성률(%)"),
+            ],
+        )
+    )
+    st.altair_chart(chart, use_container_width=True)
 else:
     st.info("기록이 아직 없습니다.")
 
@@ -444,7 +518,6 @@ st.subheader("🧠 AI 코치 컨디션 리포트")
 btn = st.button("컨디션 리포트 생성", type="primary")
 
 if btn:
-    # Dog image
     dog = get_dog_image()
     st.session_state.dog = dog
 
@@ -460,6 +533,12 @@ if btn:
         mood_label=mood_label,
         dog_breed=dog_breed,
     )
+    summary = generate_summary(
+        openai_key=st.session_state.openai_key,
+        report=report,
+        completion_rate=completion_rate,
+    )
+    report_image_url = generate_report_image(st.session_state.openai_key, summary)
 
     wcol, dcol = st.columns(2)
 
@@ -479,6 +558,33 @@ if btn:
         else:
             st.warning("강아지 이미지를 가져오지 못했어요. (네트워크를 확인해 주세요)")
 
+    # ✅ (충돌 구간 정리) 요약 + 이미지 섹션
+    st.markdown("### ✨ 컨디션 리포트 요약")
+    summary_cols = st.columns(2)
+
+    with summary_cols[0]:
+        st.markdown("**한 줄 요약**")
+        if summary:
+            st.write(summary)
+        else:
+            st.warning("요약을 생성하지 못했어요. (OpenAI API Key/네트워크를 확인해 주세요)")
+
+        st.markdown("**오늘의 달성률**")
+        st.write(f"{completion_rate}%")
+
+        st.markdown("**오늘의 강아지 사진**")
+        if dog_url:
+            st.image(dog_url, use_container_width=True)
+        else:
+            st.warning("강아지 이미지를 가져오지 못했어요.")
+
+    with summary_cols[1]:
+        st.markdown("**AI 생성 이미지**")
+        if report_image_url:
+            st.image(report_image_url, use_container_width=True)
+        else:
+            st.warning("AI 이미지를 생성하지 못했어요. (OpenAI API Key/네트워크를 확인해 주세요)")
+
     share_payload = {
         "date": dt.date.today().isoformat(),
         "coach_style": coach_style,
@@ -489,15 +595,19 @@ if btn:
         "mood_label": mood_label,
         "dog_breed": dog_breed,
         "report": report,
+        "summary": summary,
+        "report_image_url": report_image_url,
         "habits_checked": {k: v for k, v in habits_checked.items()},
     }
 
+    # ✅ (충돌 구간 정리) 공유 텍스트에 한 줄 요약 포함
     share_text = (
         "📊 AI 습관 트래커 공유\n"
         f"- 날짜: {share_payload['date']}\n"
         f"- 코치: {coach_style}\n"
         f"- 달성률: {completion_rate}% ({completed_count}/{total_habits})\n"
         f"- 기분: {mood}/10 ({mood_label})\n"
+        f"- 한 줄 요약: {summary or '생성 실패'}\n"
         f"- 강아지: {dog_breed or '없음'}\n\n"
         "✅ 체크한 습관\n"
         + "\n".join([f"- {k}" for k, v in habits_checked.items() if v])
