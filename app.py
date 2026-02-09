@@ -463,52 +463,86 @@ with m3:
 upsert_today_record(completed_count, completion_rate, mood, total_habits)
 
 # -----------------------------
-# Chart (최근 7일)
+# Calendar (최근 추이)
 # -----------------------------
-st.subheader("📈 최근 7일 추이")
+st.subheader("🗓️ 최근 추이 (달력)")
 
 history_df = pd.DataFrame(st.session_state.history)
+
 if not history_df.empty:
     history_df["date"] = pd.to_datetime(history_df["date"])
     history_df = history_df.sort_values("date")
 
+    # 최근 28일(4주) 캘린더 히트맵
     today = pd.to_datetime(dt.date.today().isoformat())
-    start = today - pd.Timedelta(days=6)
-    last7 = history_df[(history_df["date"] >= start) & (history_df["date"] <= today)].copy()
+    start = today - pd.Timedelta(days=27)
 
+    recent = history_df[(history_df["date"] >= start) & (history_df["date"] <= today)].copy()
+
+    # 모든 날짜 채우기 (빈 날은 0%)
     all_days = pd.date_range(start=start, end=today, freq="D")
-    last7 = last7.set_index("date").reindex(all_days)
-    last7.index.name = "date"
-    last7 = last7.reset_index()
-    last7["completion_rate"] = last7["completion_rate"].fillna(0).astype(int)
+    recent = recent.set_index("date").reindex(all_days)
+    recent.index.name = "date"
+    recent = recent.reset_index()
 
-    def _rate_color(rate: int) -> str:
-        if rate == 100:
-            return "#8B1E1E"
-        if rate >= 75:
-            return "#F28C28"
-        if rate >= 50:
-            return "#F5C542"
-        return "#F9E79F"
+    recent["completion_rate"] = recent["completion_rate"].fillna(0).astype(int)
 
-    last7["color"] = last7["completion_rate"].apply(_rate_color)
+    # 달력 그리드용: 주(week) / 요일(dow)
+    # (최근 28일 기준으로 4주로 보이도록 week_index를 직접 계산)
+    recent["day_index"] = (recent["date"] - start).dt.days
+    recent["week"] = (recent["day_index"] // 7).astype(int)  # 0~3
+    recent["dow"] = recent["date"].dt.dayofweek  # 월=0 ... 일=6
 
-    chart = (
-        alt.Chart(last7)
-        .mark_bar()
+    # 표시용 텍스트
+    recent["day"] = recent["date"].dt.day.astype(str)
+    recent["date_str"] = recent["date"].dt.strftime("%Y-%m-%d")
+
+    # 요일 라벨(월~일)
+    dow_labels = ["월", "화", "수", "목", "금", "토", "일"]
+
+    # 초록 그라데이션(낮음=연초록, 높음=진초록)
+    # - 스케일은 0~100 고정
+    calendar = (
+        alt.Chart(recent)
+        .mark_rect(cornerRadius=6)
         .encode(
-            x=alt.X("date:T", title=""),
-            y=alt.Y("completion_rate:Q", title="달성률(%)", scale=alt.Scale(domain=[0, 100])),
-            color=alt.Color("color:N", scale=None, legend=None),
+            x=alt.X("dow:O", title="", sort=list(range(7)),
+                    axis=alt.Axis(labelExpr=f"['{dow_labels[0]}','{dow_labels[1]}','{dow_labels[2]}','{dow_labels[3]}','{dow_labels[4]}','{dow_labels[5]}','{dow_labels[6]}'][datum.value]")),
+            y=alt.Y("week:O", title="", sort=list(range(3, -1, -1))),  # 최신 주가 아래쪽으로
+            color=alt.Color(
+                "completion_rate:Q",
+                title="달성률(%)",
+                scale=alt.Scale(domain=[0, 100], range=["#e9f7ef", "#0b6b3a"]),  # 연초록 -> 진초록
+                legend=alt.Legend(orient="right"),
+            ),
             tooltip=[
-                alt.Tooltip("date:T", title="날짜"),
+                alt.Tooltip("date_str:N", title="날짜"),
+                alt.Tooltip("completion_rate:Q", title="달성률(%)"),
+            ],
+        )
+        .properties(height=220)
+    )
+
+    # 날짜 숫자 오버레이
+    labels = (
+        alt.Chart(recent)
+        .mark_text(baseline="middle", fontSize=12)
+        .encode(
+            x=alt.X("dow:O", sort=list(range(7)), title=""),
+            y=alt.Y("week:O", sort=list(range(3, -1, -1)), title=""),
+            text=alt.Text("day:N"),
+            tooltip=[
+                alt.Tooltip("date_str:N", title="날짜"),
                 alt.Tooltip("completion_rate:Q", title="달성률(%)"),
             ],
         )
     )
-    st.altair_chart(chart, use_container_width=True)
+
+    st.altair_chart(calendar + labels, use_container_width=True)
+    st.caption("최근 28일 기준. 색이 진할수록 달성률이 높아요. (빈 날은 0%로 표시)")
 else:
     st.info("기록이 아직 없습니다.")
+
 
 
 # -----------------------------
